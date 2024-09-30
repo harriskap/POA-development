@@ -1,0 +1,132 @@
+---
+title: "Untitled"
+author: "Harris Kaplan"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+#This code is used to transfer cell type labels from mutant/wildtype datasets onto the B6 dataset.
+
+# Load libraries
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+
+```
+
+
+```{r}
+
+#load all B6 reference data (merged across all ages) - mapping excitatory and inhibitory separately.
+
+excit.merge <- readRDS("")
+
+#load mutant data - this could include control littermates as part of the dataset (i.e. data from multiple samples)
+#these datasets have already been run through SCTransform and RunPCA
+
+mut.data <- readRDS("")
+
+#assuming PCA, UMAP, clusters all done well enough in my e/i separation files. This should always be the case.
+query.assay.to.use = "SCT"
+ndims = 150
+recomp.resid = FALSE
+excit.anchors <- FindTransferAnchors(reference = excit.merge, 
+                                     query = mut.data, 
+                                     normalization.method = "SCT", 
+                                     recompute.residuals = recomp.resid,
+                                     reference.assay = "SCT",
+                                     query.assay = query.assay.to.use,
+                                     reference.reduction = "pca",
+                                     dims = 1:ndims
+                                     )
+
+predictions <- TransferData(anchorset = excit.anchors, refdata = excit.merge$my.cell.type, dims = 1:ndims)
+
+#classify cells into 1 of 3 categories: confident, loose, or mixed. Each cell can be in only one category
+#confident - at least 0.8 prediction
+pred.mod <- predictions
+pred.mod$predicted.id[pred.mod$prediction.score.max < 0.8] <- NA
+mut.data$confident.predictions <- pred.mod$predicted.id
+
+#loose - at least 0.5 prediction, as long as it's 2x 2nd-best prediction
+pred.mod <- predictions
+pred.mod$predicted.id[pred.mod$prediction.score.max < 0.5] <- NA
+pred.mod$predicted.id[pred.mod$prediction.score.max > 0.8] <- NA
+predscores <- pred.mod[,1:(ncol(pred.mod)-1)]
+#must loop thru all non-zero cells now
+for (i in 1:nrow(predscores)){
+  if (sum(predscores[i,2:ncol(predscores)]) > 0){
+    predscores.thisrow <- predscores[,2:ncol(predscores)]
+    order.of.cols <- order(as.matrix(predscores[i,2:ncol(predscores)]),decreasing=T)
+    sorted.scores <- predscores.thisrow[i,order.of.cols]
+    if ((sorted.scores[2]*2) > sorted.scores[1]){
+      predscores[i,1] <- NA
+    }
+  }
+}
+mut.data$loose.predictions <- predscores$predicted.id
+
+#mixed - any remaining
+mut.data$mixed.predictions <- NA
+mut.data$mixed.predictions[is.na(mut.data$confident.predictions) & is.na(mut.data$loose.predictions)] <- predictions$predicted.id[is.na(mut.data$confident.predictions) & is.na(mut.data$loose.predictions)]
+
+mut.data$all.predictions <- NA
+mut.data$prediction.confidence <- NA
+mut.data$all.predictions[!is.na(mut.data$confident.predictions)] <- mut.data$confident.predictions[!is.na(mut.data$confident.predictions)]
+mut.data$prediction.confidence[!is.na(mut.data$confident.predictions)] <- "confident"
+mut.data$all.predictions[!is.na(mut.data$loose.predictions)] <- mut.data$loose.predictions[!is.na(mut.data$loose.predictions)]
+mut.data$prediction.confidence[!is.na(mut.data$loose.predictions)] <- "loose"
+mut.data$all.predictions[!is.na(mut.data$mixed.predictions)] <- mut.data$mixed.predictions[!is.na(mut.data$mixed.predictions)]
+mut.data$prediction.confidence[!is.na(mut.data$mixed.predictions)] <- "mixed"
+
+#evaluate the result
+
+#are all cells given a prediction?
+(sum(table(mut.data$mixed.predictions)) + sum(table(mut.data$loose.predictions)) + sum(table(mut.data$confident.predictions))) / ncol(mut.data)
+
+#what fraction of cells are mixed, loose, confident?
+sum(table(mut.data$mixed.predictions)) / ncol(mut.data)
+sum(table(mut.data$loose.predictions)) / ncol(mut.data)
+sum(table(mut.data$confident.predictions)) / ncol(mut.data)
+
+#look at the distribution by cell type
+sample_distr <- mut.data@meta.data %>% group_by(all.predictions,prediction.confidence) %>% dplyr::count() %>% 
+  group_by(all.predictions) %>% mutate(percent = 100*n/sum(n)) %>% ungroup()
+ggplot(sample_distr,aes(x = all.predictions,y = percent, fill = prediction.confidence)) + geom_col() + theme(axis.text.x = element_text(angle = 90))
+
+mut.data$my.cell.type <- NA
+mut.data$my.cell.type[!is.na(mut.data$confident.predictions)] <- mut.data$confident.predictions[!is.na(mut.data$confident.predictions)]
+mut.data$my.cell.type[!is.na(mut.data$loose.predictions)] <- mut.data$loose.predictions[!is.na(mut.data$loose.predictions)]
+
+p1 <- DimPlot(mut.data,group.by = "my.cell.type",label=T) + NoLegend()
+p2 <- DimPlot(mut.data,group.by = "seurat_clusters",label=T) + NoLegend()
+p1+p2
+
+p2 <- DimPlot(mut.data,group.by = "mixed.predictions",label=T) + NoLegend()
+p1+p2
+
+cluster.info <- data.frame(new.cluster = mut.data$seurat_clusters, my.celltype = mut.data$my.cell.type)
+my.celltype.splits <- cluster.info %>% group_by(new.cluster, my.celltype) %>% summarize(Count = n()) %>% group_by(new.cluster) %>% mutate(total_count = sum(Count)) %>% group_by(new.cluster, my.celltype) %>% mutate(prop = Count / total_count, Count = NULL, total_count = NULL) %>% ungroup() %>% spread(my.celltype,prop,fill=0) %>% mutate(n.a.scseq = `<NA>`, `<NA>` = NULL)
+my.celltype.splits <- as.data.frame(my.celltype.splits)
+row.names(my.celltype.splits) <- my.celltype.splits$new.cluster
+my.celltype.splits$new.cluster <- NULL
+slanter::sheatmap(my.celltype.splits)
+
+#check distribution across samples
+sample_distr <- mut.data@meta.data %>% group_by(sample,prediction.confidence) %>% dplyr::count() %>% 
+  group_by(sample) %>% mutate(percent = 100*n/sum(n)) %>% ungroup()
+ggplot(sample_distr,aes(x = sample,y = percent, fill = prediction.confidence)) + geom_col() + theme(axis.text.x = element_text(angle = 90))
+
+
+saveRDS(mut.data,file = "")
+
+
+
+```
+

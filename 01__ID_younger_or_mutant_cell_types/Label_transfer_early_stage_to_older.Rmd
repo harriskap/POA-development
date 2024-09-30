@@ -1,0 +1,149 @@
+---
+title: "Untitled"
+author: "Harris Kaplan"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+#This code is used to transfer cell type labels from older ages onto cells from a single younger age.
+
+# Load libraries
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+
+```
+
+
+```{r}
+
+#load the merged data
+#the merged data consists of only excitatory neurons (would be run the same way with inhibitory neurons, just run separately), merged across all ages, then normalized using SCTransform across the entire dataset.
+
+excit.merge <- readRDS("")
+
+#subset out older age(s) - already with cell types ID'd (metadata column "my.cell.type")
+p65 <- subset(excit.merge,subset=age=="p65")
+
+#subset one younger age
+p28<-subset(excit.merge,subset=age=="p28")
+
+p28 <- RunPCA(object = p28, npcs = 150)
+p28 <- RunUMAP(p28, dims = 1:150, reduction = "pca")
+p28 <- FindNeighbors(object = p28, dims = 1:150)
+p28 <- FindClusters(object = p28, resolution = c(12))
+Idents(object = p28) <- "SCT_snn_res.12"
+levels(p28) <- factor(0:160) #Just to reorder them due to singletons, to avoid error
+p28$seurat_clusters <- Idents(p28)
+
+query.assay.to.use = "SCT"
+ndims = 150
+recomp.resid = FALSE
+excit.anchors <- FindTransferAnchors(reference = p65, 
+                                     query = p28, 
+                                     normalization.method = "SCT", 
+                                     recompute.residuals = recomp.resid,
+                                     reference.assay = "SCT",
+                                     query.assay = query.assay.to.use,
+                                     reference.reduction = "pca",
+                                     dims = 1:ndims
+                                     )
+
+
+#classify cells into 1 of 3 categories: confident, loose, or mixed. Each cell can be in only one category. Cells in the confident and loose category maintain that ID, cells in the "mixed" category are filtered out.
+
+#confident - at least 0.8 prediction score
+predictions <- TransferData(anchorset = excit.anchors, refdata = p65$my.cell.type, dims = 1:ndims)
+predictions$predicted.id[predictions$prediction.score.max < 0.8] <- NA
+p28$confident.predictions <- predictions$predicted.id
+
+#loose - at least 0.5 prediction score, as long as it's 2x 2nd-best prediction
+predictions <- TransferData(anchorset = excit.anchors, refdata = p65$my.cell.type, dims = 1:ndims)
+predictions$predicted.id[predictions$prediction.score.max < 0.5] <- NA
+predictions$predicted.id[predictions$prediction.score.max > 0.8] <- NA
+predscores <- predictions[,1:(ncol(predictions)-1)]
+#must loop thru all non-zero cells now
+for (i in 1:nrow(predscores)){
+  if (sum(predscores[i,2:ncol(predscores)]) > 0){
+    predscores.thisrow <- predscores[,2:ncol(predscores)]
+    order.of.cols <- order(as.matrix(predscores[i,2:ncol(predscores)]),decreasing=T)
+    sorted.scores <- predscores.thisrow[i,order.of.cols]
+    if ((sorted.scores[2]*2) > sorted.scores[1]){
+      predscores[i,1] <- NA
+    }
+  }
+}
+p28$loose.predictions <- predscores$predicted.id
+
+#mixed - any remaining
+predictions <- TransferData(anchorset = excit.anchors, refdata = p65$my.cell.type, dims = 1:ndims)
+p28$mixed.predictions <- NA
+p28$mixed.predictions[is.na(p28$confident.predictions) & is.na(p28$loose.predictions)] <- predictions$predicted.id[is.na(p28$confident.predictions) & is.na(p28$loose.predictions)]
+
+p28$all.predictions <- NA
+p28$prediction.confidence <- NA
+p28$all.predictions[!is.na(p28$confident.predictions)] <- p28$confident.predictions[!is.na(p28$confident.predictions)]
+p28$prediction.confidence[!is.na(p28$confident.predictions)] <- "confident"
+p28$all.predictions[!is.na(p28$loose.predictions)] <- p28$loose.predictions[!is.na(p28$loose.predictions)]
+p28$prediction.confidence[!is.na(p28$loose.predictions)] <- "loose"
+p28$all.predictions[!is.na(p28$mixed.predictions)] <- p28$mixed.predictions[!is.na(p28$mixed.predictions)]
+p28$prediction.confidence[!is.na(p28$mixed.predictions)] <- "mixed"
+
+#evaluate the result
+
+#are all cells given a prediction?
+(sum(table(p28$mixed.predictions)) + sum(table(p28$loose.predictions)) + sum(table(p28$confident.predictions))) / ncol(p28)
+
+#what fraction of cells are mixed, loose, confident?
+sum(table(p28$mixed.predictions)) / ncol(p28)
+sum(table(p28$loose.predictions)) / ncol(p28)
+sum(table(p28$confident.predictions)) / ncol(p28)
+
+#look at the distribution by cell type
+sample_distr <- p28@meta.data %>% group_by(all.predictions,prediction.confidence) %>% dplyr::count() %>% 
+  group_by(all.predictions) %>% mutate(percent = 100*n/sum(n)) %>% ungroup()
+ggplot(sample_distr,aes(x = all.predictions,y = percent, fill = prediction.confidence)) + geom_col() + theme(axis.text.x = element_text(angle = 90))
+
+p1 <- DimPlot(p28,group.by="confident.predictions",label=T) + NoLegend()
+p2 <- DimPlot(p28,label=T)+ NoLegend() #seurat clusters determined earlier - do these match up?
+p1+p2
+
+cluster.info <- data.frame(new.cluster = p28$seurat_clusters, my.celltype = p28$confident.predictions)
+my.celltype.splits <- cluster.info %>% group_by(new.cluster, my.celltype) %>% summarize(Count = n()) %>% group_by(new.cluster) %>% mutate(total_count = sum(Count)) %>% group_by(new.cluster, my.celltype) %>% mutate(prop = Count / total_count, Count = NULL, total_count = NULL) %>% ungroup() %>% spread(my.celltype,prop,fill=0) %>% mutate(n.a.scseq = `<NA>`, `<NA>` = NULL)
+my.celltype.splits <- as.data.frame(my.celltype.splits)
+row.names(my.celltype.splits) <- my.celltype.splits$new.cluster
+my.celltype.splits$new.cluster <- NULL
+slanter::sheatmap(my.celltype.splits)
+
+cluster.info <- data.frame(new.cluster = p28$seurat_clusters, my.celltype = p28$loose.predictions)
+my.celltype.splits <- cluster.info %>% group_by(new.cluster, my.celltype) %>% summarize(Count = n()) %>% group_by(new.cluster) %>% mutate(total_count = sum(Count)) %>% group_by(new.cluster, my.celltype) %>% mutate(prop = Count / total_count, Count = NULL, total_count = NULL) %>% ungroup() %>% spread(my.celltype,prop,fill=0) %>% mutate(n.a.scseq = `<NA>`, `<NA>` = NULL)
+my.celltype.splits <- as.data.frame(my.celltype.splits)
+row.names(my.celltype.splits) <- my.celltype.splits$new.cluster
+my.celltype.splits$new.cluster <- NULL
+slanter::sheatmap(my.celltype.splits)
+
+p1 <- DimPlot(p28,group.by="loose.predictions",label=T) + NoLegend()
+p2 <- DimPlot(p28,label=T)+ NoLegend()
+p1+p2
+
+p28$my.cell.type <- NA
+p28$my.cell.type[!is.na(p28$confident.predictions)] <- p28$confident.predictions[!is.na(p28$confident.predictions)]
+p28$my.cell.type[!is.na(p28$loose.predictions)] <- p28$loose.predictions[!is.na(p28$loose.predictions)]
+
+sum(table(p28$my.cell.type)) / ncol(p28)
+
+#check if the mixed predictions might be actually usable - usually never the case.
+p1 <- DimPlot(p28,group.by="my.cell.type",label=T) + NoLegend()
+p2 <- DimPlot(p28,group.by="mixed.predictions",label=T) + NoLegend()
+p1+p2
+
+saveRDS(p28,file = "")
+
+```
+
