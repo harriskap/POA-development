@@ -1,0 +1,245 @@
+---
+title: "Untitled"
+author: "Harris Kaplan"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+#this code is used to generate Ext Fig 5d-f,j
+
+# Load libraries
+library(Seurat)
+library(ggplot2)
+library(pheatmap)
+library(palr)
+library(tidyverse)
+
+
+#load the merged data of E16 to P65
+#the merged data consists of only excitatory neurons (would be run the same way with inhibitory neurons, just run separately), merged across ages E16 to P65, then normalized using SCTransform across the entire dataset.
+
+excit.merge <- readRDS("")
+
+
+```
+
+
+```{r Ext Fig 5d}
+
+#load excitatory E14 neurons, which have already been ID'd using the same procedure described in folder 01.
+
+e14.excit <- readRDS("")
+
+#set up the right datasets - use inhibitory?
+run.inhib <- T
+
+if (run.inhib == T){
+  e14.dataset <- e14.inhib
+  e16p65.dataset <- inhib.merge
+} else {
+  e14.dataset <- e14.excit
+  e16p65.dataset <- excit.merge
+}
+
+
+#setup P65
+p65.dataset <- subset(e16p65.dataset,subset = age == "p65")
+p65.dataset <- SCTransform(p65.dataset,vars.to.regress = c("percent.mito","percent.ribo","Percent.Largest.Gene"))
+p65.dataset <- RunPCA(p65.dataset,npcs = 150)
+#put cell types in desired order, by region
+celltypes <- names(table(p65.dataset$my.cell.type))
+celltypes <- c(celltypes[1:19],celltypes[21:28],celltypes[20],celltypes[29:37],celltypes[39:46],celltypes[38],celltypes[47],celltypes[50:57],celltypes[48:49],celltypes[58:64])
+
+#remove cells lacking ID's from e14 neurons
+NAcells<-is.na(e14.dataset$my.cell.type)
+cell.names<-colnames(e14.dataset)
+NAcells<-cell.names[NAcells]
+e14.dataset<-subset(e14.dataset, cells = NAcells, invert = TRUE) 
+e14.dataset <- SCTransform(e14.dataset,vars.to.regress = c("percent.mito","percent.ribo","Percent.Largest.Gene"))
+e14.dataset <- RunPCA(e14.dataset,npcs = 150)
+
+excit.anchors <- FindTransferAnchors(reference = p65.dataset, 
+                                     query = e14.dataset, 
+                                     normalization.method = "SCT", 
+                                     recompute.residuals = FALSE,
+                                     reference.assay = "SCT",
+                                     query.assay = "SCT",
+                                     reference.reduction = "pca",
+                                     dims = 1:150
+)
+predictions <- TransferData(anchorset = excit.anchors, refdata = p65.dataset$my.cell.type, dims = 1:150)
+
+#exclude cell types absent from that particular age
+good.celltypes <- sort(names(which(table(e14.dataset$my.cell.type) >0)))
+
+#setup empty matrix
+predscore.matrix <- matrix(,nrow = length(good.celltypes),ncol = length(good.celltypes))
+
+#fill in the values for each cell type - taking the average.
+#when running inhibitory - switch "e-" to "i-"
+for (j in 1:length(good.celltypes)){
+  ct.cells <- colnames(subset(e14.dataset,subset = my.cell.type == good.celltypes[j]))
+  ct.predictions <- predictions[row.names(predictions) %in% ct.cells,]
+  predscore.means <- colMeans(ct.predictions[,2:(ncol(ct.predictions)-1)])
+  names(predscore.means) <- paste0("e-",substring(colnames(predictions[2:(ncol(predictions)-1)]),20,22))
+  for (k in 1:length(good.celltypes)){
+    predscore.matrix[j,k] <- predscore.means[grep(paste0(good.celltypes[k],"$"),names(predscore.means))]
+  }
+}
+predscore.matrix <- t(predscore.matrix)
+rownames(predscore.matrix) <- good.celltypes
+colnames(predscore.matrix) <- good.celltypes
+
+pheatmap(predscore.matrix,cluster_rows = F,cluster_cols = F, color = rev(bathy_deep_pal(50)),border_color = NA, breaks=seq(0,1,1/49))
+
+```
+
+
+```{r Ext Fig 5e}
+
+#after running the Ext Fig 5d code above, use those data:
+e14.to.p65.excit <- data.frame(identity.score = diag(predscore.matrix))
+
+#generate the same data for the inhibitory dataset, using the code above. Alternatively generate each of these, save them, and load them here.
+e14.to.p65.inhib <- data.frame(identity.score = diag(predscore.matrix))
+
+#use the code "E16_to_P65_IDscore_and_matrices.Rmd" to generate the E16 prediction score datasets, and load them here.
+e16.to.p65.excit <- readRDS("")
+e16.to.p65.inhib <- readRDS("")
+#convert each to data frame of the diagonal as above with E14.
+
+#combine e and i
+e14.to.p65.ei <- rbind(e14.to.p65.excit,e14.to.p65.inhib)
+e16.to.p65.ei <- rbind(e16.to.p65.excit,e16.to.p65.inhib)
+
+e14.to.p65.ei$age <- "e14"
+e16.to.p65.ei$age <- "e16"
+all.predscores <- rbind(e14.to.p65.ei,e16.to.p65.ei)
+
+ggplot(all.predscores,aes(x=identity.score, fill=age, color=age)) + geom_histogram(position="identity",alpha=0.5) + theme_classic() + xlim(0,1) + scale_color_manual(values = c("#f57e20","#b5afac")) + scale_fill_manual(values = c("#f57e20","#b5afac")) + NoLegend()
+
+```
+
+
+```{r Ext Fig 5f}
+
+#Simply take the data in Ext Fig 5e and separate by region.
+
+```
+
+
+```{r Ext Fig 5j}
+
+#load excitatory E14 progenitors, which have been clustered as below:
+
+e14.progenitors <- readRDS("")
+
+
+e14.progenitors <- SCTransform(e14.progenitors,vars.to.regress = c("percent.mito","percent.ribo","Percent.Largest.Gene"))
+e14.progenitors <- RunPCA(e14.progenitors,npcs = 50)
+e14.progenitors <- RunUMAP(e14.progenitors, dims = 1:50, reduction = "pca")
+
+e14.progenitors <- FindNeighbors(object = e14.progenitors, dims = 1:50)
+e14.progenitors <- FindClusters(object = e14.progenitors, resolution = c(3))
+# Assign identity of clusters
+Idents(object = e14.progenitors) <- "SCT_snn_res.3"
+e14.progenitors$seurat_clusters <- Idents(e14.progenitors)
+DimPlot(e14.progenitors,reduction = "umap",label = TRUE,label.size = 6)
+
+
+#map onto specific regions from E16 data - this is essentially the same procedure as in "Label_transfer_early_stage_to_older.Rmd" but with brain regions and with excit/inhib merged.
+
+#prepare merged E16 e+i dataset
+e16.inhib <- subset(inhib.merge,subset=age=="e16")
+e16.inhib$brain.region[e16.inhib$brain.region == "BNST"] <- "BNST_inhib"
+e16.inhib$brain.region[e16.inhib$brain.region == "LPO.PS"] <- "LPO.PS_inhib"
+e16.excit <- subset(excit.merge,subset=age=="e16")
+e16.excit$brain.region[e16.excit$brain.region == "BNST"] <- "BNST_excit"
+e16.excit$brain.region[e16.excit$brain.region == "LPO.PS"] <- "LPO.PS_excit"
+
+e16.ei <- merge(e16.inhib,e16.excit)
+e16.ei <- SCTransform(e16.ei,vars.to.regress = c("percent.mito","percent.ribo","Percent.Largest.Gene"))
+e16.ei <- RunPCA(e16.ei,npcs = 150)
+e16.ei <- RunUMAP(e16.ei,dims=1:150)
+
+query.assay.to.use = "SCT"
+ndims = 150
+recomp.resid = FALSE
+inhib.anchors <- FindTransferAnchors(reference = e16.ei, 
+                                     query = e14.progenitors, 
+                                     normalization.method = "SCT", 
+                                     recompute.residuals = recomp.resid,
+                                     reference.assay = "SCT",
+                                     query.assay = query.assay.to.use,
+                                     reference.reduction = "pca",
+                                     dims = 1:ndims
+                                     )
+
+
+#classify cells into 1 of 3 categories: confident, loose, or mixed. Each cell can be in only one category
+
+#confident - at least 0.8 prediction
+predictions <- TransferData(anchorset = inhib.anchors, refdata = e16.ei$brain.region, dims = 1:ndims)
+predictions$predicted.id[predictions$prediction.score.max < 0.8] <- NA
+e14.progenitors$confident.predictions <- predictions$predicted.id
+
+#loose - at least 0.5 prediction, as long as it's 2x 2nd-best prediction
+predictions <- TransferData(anchorset = inhib.anchors, refdata = e16.ei$brain.region, dims = 1:ndims)
+predictions$predicted.id[predictions$prediction.score.max < 0.5] <- NA
+predictions$predicted.id[predictions$prediction.score.max > 0.8] <- NA
+predscores <- predictions[,1:(ncol(predictions)-1)]
+#must loop thru all non-zero cells now
+for (i in 1:nrow(predscores)){
+  if (sum(predscores[i,2:ncol(predscores)]) > 0){
+    sub.predscores <- predscores[i,2:ncol(predscores),]
+    order.mat <- order(as.matrix(sub.predscores),decreasing=T)
+    sorted.scores <- sub.predscores[,order.mat]
+    if ((sorted.scores[2]*2) > sorted.scores[1]){
+      predscores[i,1] <- NA
+    }
+  }
+}
+e14.progenitors$loose.predictions <- predscores$predicted.id
+
+#mixed - any remaining
+predictions <- TransferData(anchorset = inhib.anchors, refdata = e16.ei$brain.region, dims = 1:ndims)
+e14.progenitors$mixed.predictions <- NA
+e14.progenitors$mixed.predictions[is.na(e14.progenitors$confident.predictions) & is.na(e14.progenitors$loose.predictions)] <- predictions$predicted.id[is.na(e14.progenitors$confident.predictions) & is.na(e14.progenitors$loose.predictions)]
+
+e14.progenitors$all.predictions <- NA
+e14.progenitors$prediction.confidence <- NA
+e14.progenitors$all.predictions[!is.na(e14.progenitors$confident.predictions)] <- e14.progenitors$confident.predictions[!is.na(e14.progenitors$confident.predictions)]
+e14.progenitors$prediction.confidence[!is.na(e14.progenitors$confident.predictions)] <- "confident"
+e14.progenitors$all.predictions[!is.na(e14.progenitors$loose.predictions)] <- e14.progenitors$loose.predictions[!is.na(e14.progenitors$loose.predictions)]
+e14.progenitors$prediction.confidence[!is.na(e14.progenitors$loose.predictions)] <- "loose"
+e14.progenitors$all.predictions[!is.na(e14.progenitors$mixed.predictions)] <- e14.progenitors$mixed.predictions[!is.na(e14.progenitors$mixed.predictions)]
+e14.progenitors$prediction.confidence[!is.na(e14.progenitors$mixed.predictions)] <- "mixed"
+
+(sum(table(e14.progenitors$mixed.predictions)) + sum(table(e14.progenitors$loose.predictions)) + sum(table(e14.progenitors$confident.predictions))) / ncol(e14.progenitors)
+
+sum(table(e14.progenitors$mixed.predictions)) / ncol(e14.progenitors)
+sum(table(e14.progenitors$loose.predictions)) / ncol(e14.progenitors)
+sum(table(e14.progenitors$confident.predictions)) / ncol(e14.progenitors)
+
+e14.progenitors$my.regional.type <- NA
+e14.progenitors$my.regional.type[!is.na(e14.progenitors$confident.predictions)] <- e14.progenitors$confident.predictions[!is.na(e14.progenitors$confident.predictions)]
+e14.progenitors$my.regional.type[!is.na(e14.progenitors$loose.predictions)] <- e14.progenitors$loose.predictions[!is.na(e14.progenitors$loose.predictions)]
+
+
+
+#now that each cell is assigned a putative region, make the prediction score matrix.
+
+cluster.info <- data.frame(new.cluster = e14.progenitors$seurat_clusters, region.type = e14.progenitors$my.regional.type)
+regional.splits <- cluster.info %>% group_by(new.cluster, region.type) %>% summarize(Count = n()) %>% group_by(new.cluster) %>% mutate(total_count = sum(Count)) %>% group_by(new.cluster, region.type) %>% mutate(prop = Count / total_count, Count = NULL, total_count = NULL) %>% ungroup() %>% spread(region.type,prop,fill=0) %>% mutate(n.a.scseq = `<NA>`, `<NA>` = NULL)
+regional.splits <- as.data.frame(regional.splits)
+row.names(regional.splits) <- regional.splits$new.cluster
+regional.splits$new.cluster <- NULL
+
+pheatmap(regional.splits,cluster_rows = T,cluster_cols = T, color = rev(bathy_deep_pal(50)),border_color = NA, breaks=seq(0,1,1/49))
+
+
+```
+
