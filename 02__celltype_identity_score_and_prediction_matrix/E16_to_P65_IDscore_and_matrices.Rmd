@@ -1,0 +1,169 @@
+---
+title: "Untitled"
+author: "Harris Kaplan"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+#This code is used to generate Figures 1d and Extended 3b-c
+
+# Load libraries
+library(Seurat)
+library(ggplot2)
+library(pheatmap)
+library(palr)
+
+
+#load the merged data
+#the merged data consists of only excitatory neurons (would be run the same way with inhibitory neurons, just run separately), merged across all ages, then normalized using SCTransform across the entire dataset.
+
+excit.merge <- readRDS("")
+
+```
+
+
+```{r Fig 1d and Ext Fig 3b}
+
+#demonstrating with the excitatory dataset for Fig 1d - replace one line below "e-" to "i-" to run with the inhibitory dataset.
+
+#setup P65
+excit.p65 <- subset(excit.merge,subset = age == "p65")
+excit.p65 <- SCTransform(excit.p65,vars.to.regress = c("percent.mito","percent.ribo","Percent.Largest.Gene"))
+excit.p65 <- RunPCA(excit.p65,npcs = 150)
+#put cell types in desired order, by region
+celltypes <- names(table(excit.p65$my.cell.type))
+celltypes <- c(celltypes[1:19],celltypes[21:28],celltypes[20],celltypes[29:37],celltypes[39:46],celltypes[38],celltypes[47],celltypes[50:57],celltypes[48:49],celltypes[58:64])
+
+#choose which age you want to examine
+age.of.interest = "e16"
+
+excit.agesub <- subset(excit.merge,subset = age == age.of.interest)
+excit.agesub <- SCTransform(excit.agesub,vars.to.regress = c("percent.mito","percent.ribo","Percent.Largest.Gene"))
+excit.agesub <- RunPCA(excit.agesub,npcs = 150)
+
+excit.anchors <- FindTransferAnchors(reference = excit.p65, 
+                                     query = excit.agesub, 
+                                     normalization.method = "SCT", 
+                                     recompute.residuals = FALSE,
+                                     reference.assay = "SCT",
+                                     query.assay = "SCT",
+                                     reference.reduction = "pca",
+                                     dims = 1:150
+)
+predictions <- TransferData(anchorset = excit.anchors, refdata = excit.p65$my.cell.type, dims = 1:150)
+
+#exclude cell types absent from that particular age
+good.celltypes <- sort(names(which(table(excit.agesub$my.cell.type) >0)))
+
+#setup empty matrix
+predscore.matrix <- matrix(,nrow = length(good.celltypes),ncol = length(good.celltypes))
+
+#fill in the values for each cell type - taking the average.
+#If using inhibitory neurons, replace "e-" below with "i-"
+for (j in 1:length(good.celltypes)){
+  ct.cells <- colnames(subset(excit.agesub,subset = my.cell.type == good.celltypes[j]))
+  ct.predictions <- predictions[row.names(predictions) %in% ct.cells,]
+  predscore.means <- colMeans(ct.predictions[,2:(ncol(ct.predictions)-1)])
+  names(predscore.means) <- paste0("e-",substring(colnames(predictions[2:(ncol(predictions)-1)]),20,22))
+  for (k in 1:length(good.celltypes)){
+    predscore.matrix[j,k] <- predscore.means[grep(paste0(good.celltypes[k],"$"),names(predscore.means))]
+  }
+}
+predscore.matrix <- t(predscore.matrix)
+rownames(predscore.matrix) <- good.celltypes
+colnames(predscore.matrix) <- good.celltypes
+
+save(predscore.matrix,file="D:/Dropbox/Dulac_Lab/Data/Sequencing_Analysis/10x_multiome/B6/excitatory/e16_to_p65_identity_matrix.RData")
+
+#plot - this gives Fig 1d, replace with inhibitory dataset to give Ext Fig 3b.
+pheatmap(predscore.matrix,cluster_rows = F,cluster_cols = F, color = rev(bathy_deep_pal(50)),border_color = NA)
+
+```
+
+
+```{r Ext Fig 3c}
+
+#now make Ext Fig 3c - uses only the excitatory dataset.
+
+#calculate a value that reports the best prediction score versus the second best - simply (best - 2ndbest) / best, so 0 if it's tied between the top 2, and 1 if it's perfectly just the top 1; if it's negative, that means the value on the diagonal wasn't the highest prediction.
+
+#first, calculate this value for E16 - data in predscore.matrix generated in the code chunk above (Fig 1d).
+pred.ratio <- data.frame(celltype = good.celltypes,ratio = rep(NA,length(good.celltypes)),age = age.of.interest)
+for (i in 1:length(good.celltypes)){
+  diag.score <- predscore.matrix[i,i]
+  all.scores <- predscore.matrix[,i]
+  all.scores.nodiag <- all.scores[-i]
+  offdiag.best <- max(all.scores.nodiag)
+  pred.ratio$ratio[i] <- (diag.score - offdiag.best) / diag.score
+}
+
+
+#Now, run it over all other ages (above I did E16 already)
+
+ages <- c("e18","p0","p4","p10","p18","p28")
+
+for (this.age in 1:length(ages)){
+  
+  #setup
+  
+  predscore.matrix <- matrix(,nrow = length(celltypes),ncol = length(celltypes))
+  p.corr.matrix <- matrix(,nrow = length(celltypes),ncol = length(celltypes))
+  
+  excit.agesub <- subset(excit.merge,subset = age == ages[this.age])
+  
+  #(1) prediction score
+  
+  excit.agesub <- SCTransform(excit.agesub,vars.to.regress = c("percent.mito","percent.ribo","Percent.Largest.Gene"))
+  excit.agesub <- RunPCA(excit.agesub,npcs = 150)
+  
+  excit.anchors <- FindTransferAnchors(reference = excit.p65, 
+                                       query = excit.agesub, 
+                                       normalization.method = "SCT", 
+                                       recompute.residuals = FALSE,
+                                       reference.assay = "SCT",
+                                       query.assay = "SCT",
+                                       reference.reduction = "pca",
+                                       dims = 1:150
+  )
+  predictions <- TransferData(anchorset = excit.anchors, refdata = excit.p65$my.cell.type, dims = 1:150)
+  
+  good.celltypes <- sort(names(which(table(excit.agesub$my.cell.type) >0)))
+  predscore.matrix <- matrix(,nrow = length(good.celltypes),ncol = length(good.celltypes))
+  for (j in 1:length(good.celltypes)){
+    ct.cells <- colnames(subset(excit.agesub,subset = my.cell.type == good.celltypes[j]))
+    ct.predictions <- predictions[row.names(predictions) %in% ct.cells,]
+    predscore.means <- colMeans(ct.predictions[,2:(ncol(ct.predictions)-1)])
+    names(predscore.means) <- paste0("e-",substring(colnames(predictions[2:(ncol(predictions)-1)]),20,22))
+    for (k in 1:length(good.celltypes)){
+      predscore.matrix[j,k] <- predscore.means[grep(paste0(good.celltypes[k],"$"),names(predscore.means))]
+    }
+  }
+  predscore.matrix <- t(predscore.matrix)
+  rownames(predscore.matrix) <- good.celltypes
+  colnames(predscore.matrix) <- good.celltypes
+
+
+  pred.ratio.agesub <- data.frame(celltype = good.celltypes,ratio = rep(NA,length(good.celltypes)),age = ages[this.age])
+  for (i in 1:length(good.celltypes)){
+    diag.score <- predscore.matrix[i,i]
+    all.scores <- predscore.matrix[,i]
+    all.scores.nodiag <- all.scores[-i]
+    offdiag.best <- max(all.scores.nodiag)
+    pred.ratio.agesub$ratio[i] <- (diag.score - offdiag.best) / diag.score
+  }
+  
+  pred.ratio <- rbind(pred.ratio,pred.ratio.agesub)
+  
+}
+
+#plot the results
+
+pred.ratio$age <- factor(pred.ratio$age,levels=c("e16","e18","p0","p4","p10","p18","p28"))
+ggplot(pred.ratio, aes(x=age,y=ratio)) + geom_boxplot(outlier.size=1) + theme_classic()
+
+```
+
+
