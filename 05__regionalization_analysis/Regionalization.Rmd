@@ -1,0 +1,212 @@
+---
+title: "Untitled"
+author: "Harris Kaplan"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+#This code is used to generate regionalization correlation matrices and metrics, corresponding to Ext Fig 3d-k
+#Excitatory neurons are used as an example.
+
+# Load libraries
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+library(palr)
+
+```
+
+```{r correlation matrix between cell types at a given age}
+
+#this section generates matrices as shown in Ext Fig 3d,e,g,h, using panel e as an example (excitatory P65 neurons)
+
+#load the merged data
+#the merged data consists of only excitatory neurons (would be run the same way with inhibitory neurons, just run separately), merged across all ages, then normalized using SCTransform across the entire dataset.
+
+excit.merge <- readRDS("")
+
+p65 <- subset(excit.merge, subset = age == "p65")
+
+#put cell type names in order
+celltypes <- names(table(p65$my.cell.type))
+celltypes <- c(celltypes[1:19],celltypes[21:28],celltypes[20],celltypes[29:37],celltypes[39:46],celltypes[38],celltypes[47],celltypes[50:57],celltypes[48:49],celltypes[58:64])
+#re-sort celltypes
+new.order <- c(grep("B",celltypes),grep("H",celltypes),grep("L",celltypes),grep("C",celltypes),grep("F",celltypes),grep("M",celltypes),grep("N",celltypes),grep("A",celltypes),grep("P",celltypes),grep("T",celltypes),grep("X",celltypes))
+celltypes <- celltypes[new.order]
+
+#parameters
+nfeatures = 20000
+
+DefaultAssay(p65)<-"RNA"
+p65 <- FindVariableFeatures(p65,nfeatures=nfeatures)
+p65 <- ScaleData(p65)
+
+#generate the centroid matrix, which will be the input to corr()
+centroid.mat<-matrix(,nrow = length(celltypes),ncol = nfeatures)
+for (i in 1:length(celltypes)){
+  if (mod(i,10) == 0){
+    print(paste0("on cell type number ",i))
+  }
+  if (table(p65$my.cell.type)[i] < 2){
+    print("NOTE: this cell type has less than 2 cells. skipping...")
+    next
+  }
+  ct.sub <- subset(p65,subset = my.cell.type == celltypes[i])
+  scaledata.mat <- ct.sub@assays$RNA@scale.data
+  centroid.mat[i,] <- rowMeans(scaledata.mat)
+}
+
+
+p65.corrmat <- cor(t(centroid.mat))
+rownames(p65.corrmat) <- celltypes
+colnames(p65.corrmat) <- celltypes
+pheatmap(p65.corrmat,cluster_rows = F,cluster_cols = F,border_color = NA)
+
+#scale the plot
+scale.max <- 0.5
+scale.min <- -0.2
+scale.corrmat <- p65.corrmat
+scale.corrmat[scale.corrmat > scale.max] <- scale.max
+scale.corrmat[scale.corrmat < scale.min] <- scale.min
+pheatmap(scale.corrmat,cluster_rows = F,cluster_cols = F,border_color = NA)
+
+
+```
+
+```{r regional marker expression within each age}
+
+#this section generates Ext Fig 3j-k
+
+#first make a function to plot the heatmap:
+avg.gene.heatmap <- function(obj,
+                             br.or.ct, #"br" to run with brain.region or "ct" to run with my.cell.type
+                             identity.rows, #cell type or brain region names in order
+                             gene.columns, #gene names in order
+                             scale.max = 2,
+                             scale.min = 0,
+                             return.matrix = 0){
+  
+  DefaultAssay(obj)<-"RNA"
+  VariableFeatures(obj) <- rownames(obj)
+  obj <- ScaleData(obj)
+
+  heatmap.to.plot <- matrix(,nrow = length(identity.rows),ncol = length(gene.columns))
+  for (ident.row in 1:length(identity.rows)){
+    if (br.or.ct == "br"){
+      ident.sub <- subset(obj,subset = brain.region == identity.rows[ident.row])
+    }
+    if (br.or.ct == "ct"){
+      ident.sub <- subset(obj,subset = my.cell.type == identity.rows[ident.row])
+    }
+    for (gene in 1:length(gene.columns)){
+      gene.ind <- grep(paste0("^",gene.columns[gene],"$"),rownames(ident.sub))
+      heatmap.to.plot[ident.row,gene] <- mean(ident.sub@assays$RNA@scale.data[gene.ind,])
+    }
+  }
+  rownames(heatmap.to.plot) <- identity.rows
+  colnames(heatmap.to.plot) <- gene.columns
+  heatmap.to.plot.scaled <- heatmap.to.plot
+  heatmap.to.plot.scaled[heatmap.to.plot.scaled > scale.max] <- scale.max
+  heatmap.to.plot.scaled[heatmap.to.plot.scaled < scale.min] <- scale.min
+  
+  pheatmap(t(heatmap.to.plot.scaled),cluster_rows = F,cluster_cols = F,color = rev(bathy_deep_pal(50)),border_color = NA)
+  
+  if (return.matrix == 1){
+    return(heatmap.to.plot)
+  }
+
+}
+
+#now get the markers and plot.
+
+excit.merge$brain.region <- factor(excit.merge$brain.region, levels = c("BNST","HDB.VLPO","LPO.PS","BAC-like","PeFA","MPN.anterior","MPN.posterior","AvPE.MnPO","PVN","PVT","Mixed/Unknown"))
+Idents(excit.merge) <- "brain.region"
+
+#setup
+excit.p65 <- subset(excit.merge,subset = age == "p65")
+excit.e16 <- subset(excit.merge,subset = age == "e16")
+all.br <- names(table(excit.p65$brain.region))
+
+#get P65 markers
+region.markers.p65 <- FindAllMarkers(excit.p65,assay="RNA",only.pos=T)
+region.markers.p65 <- region.markers.p65[region.markers.p65$p_val_adj < 0.05,]
+region.markers.p65 <- region.markers.p65[region.markers.p65$avg_log2FC > 0.5,]
+#remove duplicates
+region.markers.p65 <- region.markers.p65$gene[-which(duplicated(region.markers.p65$gene))]
+
+#show P65 markers at P65 as heatmap
+avg.gene.heatmap(excit.p65,"br",all.br,region.markers.p65)
+
+#now test P65 genes on E16
+avg.gene.heatmap(excit.e16,"br",all.br,region.markers.p65)
+
+
+#now vice versa - E16 region markers onto P65
+
+#get e16 markers
+region.markers.e16 <- FindAllMarkers(excit.e16,assay="RNA",only.pos=T)
+region.markers.e16 <- region.markers.e16[region.markers.e16$p_val_adj < 0.05,]
+region.markers.e16 <- region.markers.e16[region.markers.e16$avg_log2FC > 0.5,]
+#remove duplicates
+region.markers.e16 <- region.markers.e16$gene[-which(duplicated(region.markers.e16$gene))]
+
+#show e16 markers at e16 as heatmap
+avg.gene.heatmap(excit.e16,"br",all.br,region.markers.e16)
+
+#now test e16 genes on p65
+avg.gene.heatmap(excit.p65,"br",all.br,region.markers.e16)
+
+
+#now simply remove the ones that are on BOTH lists, and re-plot
+
+unique.p65.markers <- setdiff(region.markers.p65,region.markers.e16)
+unique.e16.markers <- setdiff(region.markers.e16,region.markers.p65)
+
+avg.gene.heatmap(excit.p65,"br",all.br,unique.p65.markers)
+avg.gene.heatmap(excit.e16,"br",all.br,unique.p65.markers)
+avg.gene.heatmap(excit.e16,"br",all.br,unique.e16.markers)
+avg.gene.heatmap(excit.p65,"br",all.br,unique.e16.markers)
+
+#now, ask: at what age do marker gene expression patterns start to resemble adult?
+#simply subtract the matrices
+
+excit.p28 <- subset(excit.merge.noNA,subset = age == "p28")
+excit.p18 <- subset(excit.merge.noNA,subset = age == "p18")
+excit.p10 <- subset(excit.merge.noNA,subset = age == "p10")
+excit.p4 <- subset(excit.merge.noNA,subset = age == "p4")
+excit.p0 <- subset(excit.merge.noNA,subset = age == "p0")
+excit.e18 <- subset(excit.merge.noNA,subset = age == "e18")
+
+#for P65 markers that are NOT E16 markers
+p65.mat <- avg.gene.heatmap(excit.p65,"br",all.br,unique.p65.markers,return=1)
+p28.mat <- avg.gene.heatmap(excit.p28,"br",all.br,unique.p65.markers,return=1)
+p18.mat <- avg.gene.heatmap(excit.p18,"br",all.br,unique.p65.markers,return=1)
+p10.mat <- avg.gene.heatmap(excit.p10,"br",all.br,unique.p65.markers,return=1)
+p4.mat <- avg.gene.heatmap(excit.p4,"br",all.br,unique.p65.markers,return=1)
+p0.mat <- avg.gene.heatmap(excit.p0,"br",all.br,unique.p65.markers,return=1)
+e18.mat <- avg.gene.heatmap(excit.e18,"br",all.br,unique.p65.markers,return=1)
+e16.mat <- avg.gene.heatmap(excit.e16,"br",all.br,unique.p65.markers,return=1)
+
+cor.to.p65 <- data.frame(age = 1:8,cor = c(cor(c(e16.mat),c(p65.mat)),
+                cor(c(e18.mat),c(p65.mat)),
+                cor(c(p0.mat),c(p65.mat)),
+                cor(c(p4.mat),c(p65.mat)),
+                cor(c(p10.mat),c(p65.mat)),
+                cor(c(p18.mat),c(p65.mat)),
+                cor(c(p28.mat),c(p65.mat)),1
+                ))
+
+ggplot(cor.to.p65, aes(x = age, y = cor)) + geom_line(aes(linewidth = 4)) + theme_classic() + ylim(0.3,1) + theme(text = element_text(family = "Myriad Pro")) + theme(text = element_text(size = 20))   
+
+
+```
+
+
+
+
