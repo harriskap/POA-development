@@ -1,0 +1,306 @@
+---
+title: "Untitled"
+author: "Harris Kaplan"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+#This code is used to generate maturation trajectories shown in Fig 2. This method is modeled after that used in Chari...Pachter, Science Advances 2021.
+#Excitatory neurons are used as an example.
+
+# Load libraries
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+#colors
+library(palr)
+library(scico)
+library(cartography)
+library(ggsci)
+
+
+```
+
+```{r gather the distance data}
+
+#In this section, the PCA distance maturation trajectory data will be calculated and saved.
+
+#load the merged data
+#the merged data consists of only excitatory neurons (would be run the same way with inhibitory neurons, just run separately), merged across all ages, then normalized using SCTransform across the entire dataset.
+
+excit.merge <- readRDS("")
+
+
+#Parameters
+
+percent.var.cutoff <- 20 #in percent, so = 20, 30, 50, etc.; 100 PCs usually gives 40-50% variance explained. 20 seems to work best.
+num.hvgs <- 2000 #I think 2000 works well.
+max.PC.num <- 100 #default to 100. at most, this number of PCs will be used. Will report if any goes beyond this (then it'll use this value instead)
+min.cells <- 5 #won't calculate distances if less than this number of cells at a given age.
+dist.method <- "manhattan" #euclidean or manhattan - manhattan tends to work best / is most theoretically best according to Chari .. Pachter paper
+
+
+#first gather all distance matrices - all distances between each pair of ages' centroids, for each cell type.
+
+excit.celltypes <- names(table(excit.merge$my.cell.type))
+ages <- names(table(excit.merge$age))
+
+#pre-allocate space
+all.distmats.array <- array(NA,c(length(ages),length(ages),length(excit.celltypes)))
+
+
+for (ct in 1:length(excit.celltypes)){
+  
+  print(paste0("On cell type #",ct))
+  
+  ct.sub<-subset(excit.merge,subset=my.cell.type==excit.celltypes[ct])
+  DefaultAssay(ct.sub)<-"RNA"
+  ct.sub<-SCTransform(ct.sub,variable.features.n = num.hvgs,verbose=F)
+  if (max.PC.num > ncol(ct.sub)){
+    num.PCs.to.use <- ncol(ct.sub)
+  } else {
+    num.PCs.to.use <- max.PC.num
+  }
+  ct.sub<-RunPCA(ct.sub,npcs=num.PCs.to.use,approx=F,verbose=F)
+  
+  #calculate num.PCs to use
+  var.expl <- cumsum(ct.sub@reductions$pca@stdev^2 / ct.sub@reductions$pca@misc$total.variance)
+  num.PCs.final <- min(which(var.expl > (percent.var.cutoff/100)))
+  if (num.PCs.final > max.PC.num){
+    num.PCs.final <- num.PCs.to.use
+    print(paste0("number of PCs exceeded max.PC.num, num.PCs.to.use variance instead: ",var.expl[num.PCs.to.use]))
+  }
+  
+  #generate the centroid matrix, which will be the input to dist()
+  centroid.mat<-matrix(,nrow = length(ages),ncol = num.PCs.final)
+  for (i in 1:length(ages)){
+    if (table(ct.sub$age)[i] < min.cells){
+      next
+    }
+    age.sub <- subset(ct.sub,subset=age==ages[i])
+    pc.mat <- age.sub@reductions$pca@cell.embeddings[,1:num.PCs.final]
+    centroid.mat[i,] <- colMeans(pc.mat)
+  }
+  distmat <- dist(centroid.mat,method = dist.method)
+  names(distmat)<-ages
+  
+  all.distmats.array[,,ct] <- as.matrix(distmat)
+  
+}
+
+#save the file
+save(all.distmats.array,file=)
+
+```
+
+```{r plot the results - Fig 2b-k}
+
+#In this section, the PCA distance maturation plots as in Fig 2b-k will be generated.
+
+#First, generate the bar plot shown in Fig 2c, including separation by trajectory type.
+
+#load the all.distmats.array data
+load()
+
+excit.celltypes <- sort(names(table(excit.merge$my.cell.type)))
+ages <- names(table(excit.merge$age))
+
+age.palette <- scico(8, begin=0, end=0.9, palette = "lapaz", direction=-1)
+names(age.palette) <- ages
+
+#gather all bottom rows - distance to p65
+p65.dists <- matrix(,nrow=length(excit.celltypes),ncol=length(ages))
+for (ct in 1:length(excit.celltypes)){
+  p65.dists[ct,] <- all.distmats.array[length(ages),,ct]
+}
+#check where NA's are - important that they're only at the start, maybe even only e16?
+is.na(p65.dists)
+
+#Prevent any movement backwards -- plot only maturation, not transient changes:
+for (i in 1:nrow(p65.dists)){
+  for (j in 1:(ncol(p65.dists)-1)){
+    if (!is.na(p65.dists[i,j+1] + p65.dists[i,j])){
+      if (p65.dists[i,j+1] > p65.dists[i,j]){
+        p65.dists[i,j+1] <- p65.dists[i,j]
+      }
+    }
+  }
+}
+
+plot.reshape <- as.data.frame(p65.dists)
+plot.reshape$cell.type <- excit.celltypes
+plot.reshape$cell.type.index <- 1:length(excit.celltypes)
+plot.reshape <- plot.reshape[,c(length(ages)+1,length(ages)+2,1:length(ages))]
+colnames(plot.reshape) <- c("cell.type","cell.type.index",ages)
+plot.reshape <- reshape2::melt(plot.reshape, id=c("cell.type","cell.type.index"))
+colnames(plot.reshape) <- c("cell.type","cell.type.index","age","p65.dist")
+plot.reshape$ct.label <- NA
+plot.reshape$ct.label[plot.reshape$age == "p65"] <- plot.reshape$cell.type[plot.reshape$age == "p65"]
+
+#now set up the line segments to be plotted
+line.segs <- plot.reshape
+line.segs <- line.segs[line.segs$age != 'p65',]
+line.segs$next.dist <- NA
+line.segs$next.dist[line.segs$age == "e16"] <- line.segs$p65.dist[line.segs$age == "e18"]
+line.segs$next.dist[line.segs$age == "e18"] <- line.segs$p65.dist[line.segs$age == "p0"]
+line.segs$next.dist[line.segs$age == "p0"] <- line.segs$p65.dist[line.segs$age == "p4"]
+line.segs$next.dist[line.segs$age == "p4"] <- line.segs$p65.dist[line.segs$age == "p10"]
+line.segs$next.dist[line.segs$age == "p10"] <- line.segs$p65.dist[line.segs$age == "p18"]
+line.segs$next.dist[line.segs$age == "p18"] <- line.segs$p65.dist[line.segs$age == "p28"]
+line.segs$next.dist[line.segs$age == "p28"] <- 0
+line.segs$age <- S4Vectors::unfactor(line.segs$age)
+line.segs$age[line.segs$age == "e16"] <- "E16 - E18"
+line.segs$age[line.segs$age == "e18"] <- "E18 - P0"
+line.segs$age[line.segs$age == "p0"] <- "P0 - P4"
+line.segs$age[line.segs$age == "p4"] <- "P4 - P10"
+line.segs$age[line.segs$age == "p10"] <- "P10 - P18"
+line.segs$age[line.segs$age == "p18"] <- "P18 - P28"
+line.segs$age[line.segs$age == "p28"] <- "P28 - P65"
+
+#make sure it plots the older ages in front of the younger ones
+line.segs <- line.segs[order(line.segs$age),]
+
+#here, plot all cell types, alphabetically ordered, and with ages going back to E16.
+sub.age.palette <- age.palette[1:7]
+names(sub.age.palette) <- c("E16 - E18","E18 - P0","P0 - P4", "P4 - P10","P10 - P18","P18 - P28","P28 - P65")
+#Move the size of the Zoom'd plot, such that the lines just touch each other.
+ggplot() + geom_segment(data = line.segs,mapping = aes(x = p65.dist, y = cell.type.index, xend = next.dist, yend = cell.type.index, group = age, color = age),size=5) + scale_x_reverse() + scale_color_manual(values = sub.age.palette) + theme_classic() + geom_text(data = plot.reshape, aes(x = 0,y = cell.type.index,label = ct.label),nudge_x = 5)  + scale_y_reverse()  + theme(text = element_text(family = "Myriad Pro"), axis.ticks.y = element_blank(),axis.text.x = element_text(size=16),axis.text.y = element_blank(), axis.title.x = element_text(size = 16)) + labs(x = "Distance from adult (a.u.)", y = "") #+ scale_x_break(c(2200,5360))
+
+#now plot only postnatal, sorted by length (i.e. how mature each cell type is at P0)
+sub.sub.age.palette <- age.palette[c(1,2,4,6,8)]
+names(sub.sub.age.palette) <- c("P0 - P4", "P4 - P10","P10 - P18","P18 - P28","P28 - P65")
+line.segs.postnatal <- line.segs[line.segs$age != 'E16 - E18',]
+line.segs.postnatal <- line.segs.postnatal[line.segs.postnatal$age != 'E18 - P0',]
+plot.reshape.postnatal <- plot.reshape[plot.reshape$age != 'E16 - E18',]
+plot.reshape.postnatal <- plot.reshape.postnatal[plot.reshape.postnatal$age != 'E18 - P0',]
+sort.plot <- as.data.frame(p65.dists)
+sort.plot$cell.type <- excit.celltypes
+sort.plot <- sort.plot[,-c(1,2)]
+sort.plot[, "max"] <- apply(sort.plot[, 1:5], 1, max)
+sort.plot <- sort.plot[order(sort.plot$max),]
+sort.plot$max.index <- 1:nrow(sort.plot)
+sort.plot <- sort.plot[,c(1:6,8,7,9)]
+sort.plot <- sort.plot[,c(-1:-(length(ages)-1))]
+plot.reshape.postnatal.sorted <- merge(plot.reshape.postnatal,sort.plot,by="cell.type")
+line.segs.postnatal.sorted <- merge(line.segs.postnatal,sort.plot,by="cell.type")
+ggplot() + geom_segment(data = line.segs.postnatal.sorted,mapping = aes(x = p65.dist, y = max.index, xend = next.dist, yend = max.index, group = age, color = age),size=5) + scale_x_reverse() + scale_color_manual(values = sub.sub.age.palette) + theme_classic() + geom_text(data = plot.reshape.postnatal.sorted, aes(x = 0,y = max.index,label = ct.label),nudge_x = 5)  + scale_y_reverse()  + theme(text = element_text(family = "Myriad Pro"), axis.ticks.y = element_blank(),axis.text.x = element_text(size=16),axis.text.y = element_blank(), axis.title.x = element_text(size = 16)) + labs(x = "Distance from adult (a.u.)", y = "") #+ scale_x_break(c(2200,5360))
+
+#Finally, split cell types into 3 categories - gradual, intermediate, and step-wise - and plot according to length in each category
+
+#How many of these 5 possible transitions does it take to get to X% (fraction.cutoff) of all your total change? In theory, anywhere from 1 (all concentrated in one bin) to 5 (evenly spread). Group this way:
+#1-2 bins - step-wise
+#3 bins - intermediate
+#4-5 bins - gradual
+
+fraction.cutoff <- 0.9
+#assign each celltype to a category
+ct.categories <- rep(NA,length(table(line.segs.postnatal.sorted$cell.type)))
+fixed.plot.mat <- p65.dists[,-c(1,2)]
+for (i in 1:length(table(line.segs.postnatal.sorted$cell.type))){
+  if (sum(is.na(fixed.plot.mat[i,])) > 0){
+    next
+  }
+  sorted.dists <- sort(diff(fixed.plot.mat[i,]))
+  total.dist <- fixed.plot.mat[i,1]*-1
+  num.ages.needed <- 0
+  fraction.traveled <- 0
+  while (fraction.traveled < fraction.cutoff){
+    num.ages.needed <- num.ages.needed + 1
+    fraction.traveled <- fraction.traveled + (sorted.dists[num.ages.needed] / total.dist)
+  }
+  if (num.ages.needed < 3){
+    ct.categories[i] <- 3
+  }
+  if (num.ages.needed == 3){
+    ct.categories[i] <- 2
+  }
+  if (num.ages.needed > 3){
+    ct.categories[i] <- 1
+  }
+}
+
+#now split the data and plot as above, stratified by category and then by length.
+names(ct.categories)<-excit.celltypes
+line.segs.cat1 <- line.segs.postnatal.sorted[line.segs.postnatal.sorted$cell.type %in% names(which(ct.categories==1)),]
+line.segs.cat2 <- line.segs.postnatal.sorted[line.segs.postnatal.sorted$cell.type %in% names(which(ct.categories==2)),]
+line.segs.cat3 <- line.segs.postnatal.sorted[line.segs.postnatal.sorted$cell.type %in% names(which(ct.categories==3)),]
+plot.reshape.cat1 <- plot.reshape.postnatal.sorted[plot.reshape.postnatal.sorted$cell.type %in% names(which(ct.categories==1)),]
+plot.reshape.cat2 <- plot.reshape.postnatal.sorted[plot.reshape.postnatal.sorted$cell.type %in% names(which(ct.categories==2)),]
+plot.reshape.cat3 <- plot.reshape.postnatal.sorted[plot.reshape.postnatal.sorted$cell.type %in% names(which(ct.categories==3)),]
+line.segs.cat1$max.index <-order(sort(unique(line.segs.cat1$max.index),index.return=T)$ix) %>% rep(each=5)
+line.segs.cat2$max.index <-order(sort(unique(line.segs.cat2$max.index),index.return=T)$ix) %>% rep(each=5)
+line.segs.cat3$max.index <-order(sort(unique(line.segs.cat3$max.index),index.return=T)$ix) %>% rep(each=5)
+plot.reshape.cat1$max.index <- order(sort(unique(plot.reshape.cat1$max.index),index.return=T)$ix) %>% rep(each=8)
+plot.reshape.cat2$max.index <- order(sort(unique(plot.reshape.cat2$max.index),index.return=T)$ix) %>% rep(each=8)
+plot.reshape.cat3$max.index <- order(sort(unique(plot.reshape.cat3$max.index),index.return=T)$ix) %>% rep(each=8)
+#now combine 3 types into 1 plot
+line.segs.fullySorted <- line.segs.cat1
+line.segs.cat2$max.index <- line.segs.cat2$max.index + length(unique(line.segs.fullySorted$max.index))
+line.segs.fullySorted <- rbind(line.segs.fullySorted,line.segs.cat2)
+line.segs.cat3$max.index <- line.segs.cat3$max.index + length(unique(line.segs.fullySorted$max.index))
+line.segs.fullySorted <- rbind(line.segs.fullySorted,line.segs.cat3)
+plot.reshape.fullySorted <- plot.reshape.cat1
+plot.reshape.cat2$max.index <- plot.reshape.cat2$max.index + length(unique(plot.reshape.fullySorted$max.index))
+plot.reshape.fullySorted <- rbind(plot.reshape.fullySorted,plot.reshape.cat2)
+plot.reshape.cat3$max.index <- plot.reshape.cat3$max.index + length(unique(plot.reshape.fullySorted$max.index))
+plot.reshape.fullySorted <- rbind(plot.reshape.fullySorted,plot.reshape.cat3)
+ggplot() + geom_segment(data = line.segs.fullySorted,mapping = aes(x = p65.dist, y = max.index, xend = next.dist, yend = max.index, group = age, color = age),size=5) + scale_x_reverse(limits=c(50,-15)) + scale_color_manual(values = sub.sub.age.palette) + theme_classic() + geom_text(data = plot.reshape.fullySorted, aes(x = 0,y = max.index,label = ct.label),nudge_x = 2,hjust=0,size=4.5)  + scale_y_reverse()  + theme(text = element_text(family = "Helvetica"), axis.ticks.y = element_blank(),axis.text.x = element_text(size=16),axis.text.y = element_blank(), axis.title.x = element_text(size = 16)) + labs(x = "Distance from adult (a.u.)", y = "") + theme(legend.position = "none")
+
+
+
+#Now, plot the line plots
+
+lineplot.data <- plot.reshape.postnatal
+lineplot.data$p65.dist <- lineplot.data$p65.dist * -1
+
+ggplot(lineplot.data, aes(x=age, y=p65.dist, group = cell.type)) + geom_line() + theme_classic()
+
+
+#higlight any cell types of interest - using AvPe/MnPO cell types as an example
+
+avpe.pal <- pal_material(palette = "pink")(10)[c(3,4,6,8,9,10)]
+
+cts.to.highlight <- c("e-A1","e-A2","e-A3","e-A4","e-A5","e-A6")
+colors <- c(avpe.pal,"#000000")
+
+#get the average
+getmean.data <- lineplot.data[-which(is.na(lineplot.data$p65.dist)),]
+good.inds<-c()
+for (i in 1:length(cts.to.highlight)){
+  good.inds <- c(good.inds,grep(paste0(cts.to.highlight[i],"$"),getmean.data$cell.type))
+}
+avpe.data <- getmean.data[good.inds,]
+avpe.mean <- aggregate(x=avpe.data$p65.dist, by=list(avpe.data$age),FUN=mean)
+avpe.mean$cell.type <- "avg"
+avpe.mean$age <- avpe.mean$Group.1
+avpe.mean$p65.dist <- avpe.mean$x
+
+cts.to.highlight <- c("e-A1","e-A2","e-A3","e-A4","e-A5","e-A6","avg")
+
+line.mappings <- data.frame(ct = c(excit.celltypes,"avg"), size = 1, color = "gray", alpha = 0.5)
+for (i in 1:length(cts.to.highlight)){
+  #line.mappings$color[line.mappings$ct == cts.to.highlight[i]] <- "#ED1555"
+  line.mappings$color[line.mappings$ct == cts.to.highlight[i]] <- colors[i]
+  line.mappings$alpha[line.mappings$ct == cts.to.highlight[i]] <- 1
+  line.mappings$size[line.mappings$ct == cts.to.highlight[i]] <- 2
+}
+
+color.mapping <- line.mappings$color
+alpha.mapping <- line.mappings$alpha
+size.mapping <- line.mappings$size
+names(color.mapping) <- line.mappings$ct
+names(alpha.mapping) <- line.mappings$ct
+names(size.mapping) <- line.mappings$ct
+
+ggplot(lineplot.data, aes(x=age, y=p65.dist, group = cell.type)) + geom_line(data = lineplot.data[!lineplot.data$cell.type %in% cts.to.highlight,],aes(size = cell.type, color = cell.type, alpha = cell.type)) + geom_line(data = lineplot.data[lineplot.data$cell.type %in% cts.to.highlight,],aes(size = cell.type, color = cell.type, alpha = cell.type)) + geom_line(data = avpe.mean,aes(size = cell.type, color = cell.type, alpha = cell.type)) + theme_classic() + scale_size_manual(values = size.mapping) + scale_color_manual(values = color.mapping) + scale_alpha_manual(values = alpha.mapping) + theme(legend.position = "none", axis.text.x = element_blank()) + xlab("") + ylab("Maturity distance (a.u.)")
+
+
+```
+
+
