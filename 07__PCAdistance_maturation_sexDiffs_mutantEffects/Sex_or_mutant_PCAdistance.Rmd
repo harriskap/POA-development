@@ -1,0 +1,274 @@
+---
+title: "Untitled"
+author: "Harris Kaplan"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+
+#This code is used to calculate distance in PCA space between sexes (as in Fig 4d, Ext Fig 9b-c) or mutants vs. controls (as in Fig 5a-b, Ext fig 10a,c).
+#Excitatory neurons are used as an example.
+
+# Load libraries
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(magrittr)
+library(tidyverse)
+library(pheatmap)
+#colors
+library(palr)
+library(scico)
+library(cartography)
+library(ggsci)
+
+
+```
+
+
+```{r distance metric and ttest functions}
+
+#Distance metric function - very similar to that used in Maturation_trajectories_PCA_distance.Rmd. Additional info is given there.
+#this is written to be used for sex as an example, but can be easily adapted to run for mutants.
+
+DistMetric_sex <- function(seurat_obj,
+                           file_save_name = "emptyFileName", #should give info about the input seurat object (e.g. the name of the object) in sufficient detail to later ID
+                       percent.var.cutoff = 20,
+                       numHVGs = 2000,
+                       skip.correlation = T, #skip the correlation and only calculate distance?
+                       dfassay = 'SCT', #if running on genes, always set to RNA - but SCT seems to work better.
+                       max.PC.num = 100,
+                       min.cells = 5)
+{
+  
+  #(1) setup
+  
+  celltypes <- names(table(seurat_obj$my.cell.type))
+  
+  if (!is_empty(grep("geno",colnames(seurat_obj@meta.data)))){
+    seurat_obj$geno[is.na(seurat_obj$geno)] <- "B6"
+  }
+
+  #detect samples
+  all.samples <- names(table(seurat_obj$sample))
+  all.samples.sex <- NA
+  for (i in 1:length(all.samples)){
+    sample.sub<-subset(seurat_obj,subset = sample == all.samples[i])
+    all.samples.sex[i] <- sample.sub$sex
+  }
+
+  #list all sample combos I want to test -- separate out male-female combos from the rest, put at the end
+  all.sample.combos <- t(as.matrix(combn(all.samples,2)))
+  sex.inds <- t(as.matrix(combn(1:length(all.samples),2)))
+  all.sample.combos.sex <- cbind(all.samples.sex[sex.inds[,1]],all.samples.sex[sex.inds[,2]])
+  sample.combo.names <- paste0(all.sample.combos[,1],"____",all.sample.combos[,2])
+  sex.comparisons <- c()
+  for (i in 1:nrow(all.sample.combos.sex)){
+    if (all.sample.combos.sex[i,1] != all.sample.combos.sex[i,2]){
+      sex.comparisons <- c(sex.comparisons,i)
+    }
+  }
+  all.sample.combos <- rbind(all.sample.combos[-sex.comparisons,],all.sample.combos[sex.comparisons,])
+  sample.combo.names <- paste0(all.sample.combos[,1],"____",all.sample.combos[,2])
+
+  #(2) calculate
+  
+  #pre-allocate space
+  dist.euc <- matrix(,nrow = length(celltypes), ncol = length(sample.combo.names))
+  dist.man <- matrix(,nrow = length(celltypes), ncol = length(sample.combo.names))
+  cells.per.comparison.1 <- matrix(0,nrow = length(celltypes), ncol = length(sample.combo.names))
+  cells.per.comparison.2 <- matrix(0,nrow = length(celltypes), ncol = length(sample.combo.names))
+  percent.var.expl <- matrix(,nrow = length(celltypes),ncol = 1)
+  
+  for (i in 1:length(celltypes)){
+    
+    if (mod(i,10) == 0){ print(paste0("on cell type number ",i))}
+    
+    ct.sub <- subset(seurat_obj, subset = my.cell.type == celltypes[i])
+    if (ncol(ct.sub) < min.cells){
+      print(paste0("too few cells for ",celltypes[i], ". Skipping..."))
+      next
+    }
+    DefaultAssay(ct.sub) <- "RNA"
+    if (dfassay == "RNA"){
+      ct.sub <- FindVariableFeatures(ct.sub,verbose=F,nfeatures = numHVGs)
+      #NOTE I decided NOT to regress out "geno" here - I found this to be detrimental - 10/27/23
+      if (length(table(ct.sub$age)) > 1){
+        ct.sub <- ScaleData(ct.sub,verbose=F,vars.to.regress = c("age"))
+      } else {
+        ct.sub <- ScaleData(ct.sub,verbose=F)
+      }
+    } else {
+      #NOTE I decided NOT to regress out "geno" here - I found this to be detrimental - 10/27/23
+      if (length(table(ct.sub$age)) > 1){
+        ct.sub <- SCTransform(ct.sub, method = "glmGamPoi",variable.features.n = numHVGs, verbose=F,vars.to.regress = c("age"))
+      } else {
+        ct.sub <- SCTransform(ct.sub, method = "glmGamPoi",variable.features.n = numHVGs, verbose=F)
+      }
+    }
+    if (max.PC.num > ncol(ct.sub)){
+      num.PCs.to.use <- ncol(ct.sub)
+    } else {
+      num.PCs.to.use <- max.PC.num
+    }
+    ct.sub <- RunPCA(ct.sub,npcs = num.PCs.to.use,verbose=F,approx=F)
+    
+    #calculate num.PCs to use
+    var.expl <- cumsum(ct.sub@reductions$pca@stdev^2 / ct.sub@reductions$pca@misc$total.variance)
+    num.PCs.final <- min(which(var.expl > (percent.var.cutoff/100)))
+    if (num.PCs.final > max.PC.num){
+      num.PCs.final <- num.PCs.to.use
+      print(paste0("number of PCs exceeded max.PC.num, num.PCs.to.use variance instead: ",var.expl[num.PCs.to.use]))
+    }
+  
+    cells.per.sample <- table(ct.sub$sample)
+    percent.var.expl[i] <- sum(ct.sub@reductions$pca@stdev[1:num.PCs.final]^2 / ct.sub@reductions$pca@misc$total.variance)
+    
+    #generate centroid matrix for distance
+    centroid.mat<-matrix(,nrow = length(all.samples),ncol = num.PCs.final)
+    for (j in 1:length(all.samples)){
+      if (length(cells.per.sample[names(cells.per.sample) == all.samples[j]]) == 0){
+        paste0("NOTE: ", all.samples[j]," has 0 cells for cell type ", celltypes[i], ". skipping...")
+        next
+      }
+      if (cells.per.sample[names(cells.per.sample) == all.samples[j]] < min.cells) {
+        paste0("NOTE: ", all.samples[j]," has less than min.cells for cell type ", celltypes[i], ". skipping...")
+        next
+      }
+      sample.subset <- subset(ct.sub, subset = sample == all.samples[j])
+      pc.mat <- sample.subset@reductions$pca@cell.embeddings[,1:num.PCs.final]
+      centroid.mat[j,] <- colMeans(pc.mat)
+    }
+    
+    #distance - euclidean - non-weighted
+    distmat <- as.matrix(dist(centroid.mat,method = "euclidean"))
+    rownames(distmat) <- all.samples
+    colnames(distmat) <- all.samples
+    for (j in 1:nrow(all.sample.combos)){
+      dist.euc[i,j] <- distmat[rownames(distmat) == all.sample.combos[j,1],colnames(distmat) == all.sample.combos[j,2]]
+      if (length(cells.per.sample[names(cells.per.sample) == all.sample.combos[j,1]]) > 0){
+        cells.per.comparison.1[i,j] <- cells.per.sample[names(cells.per.sample) == all.sample.combos[j,1]]
+      }
+      if (length(cells.per.sample[names(cells.per.sample) == all.sample.combos[j,2]]) > 0){
+        cells.per.comparison.2[i,j] <- cells.per.sample[names(cells.per.sample) == all.sample.combos[j,2]]
+      }
+    }
+    
+    #distance - manhattan - non-weighted
+    distmat <- as.matrix(dist(centroid.mat,method = "manhattan"))
+    rownames(distmat) <- all.samples
+    colnames(distmat) <- all.samples
+    for (j in 1:nrow(all.sample.combos)){
+      dist.man[i,j] <- distmat[rownames(distmat) == all.sample.combos[j,1],colnames(distmat) == all.sample.combos[j,2]]
+    }
+    
+  }
+  
+  rownames(dist.euc) <- celltypes
+  colnames(dist.euc) <- sample.combo.names
+  rownames(dist.man) <- celltypes
+  colnames(dist.man) <- sample.combo.names
+  
+  #automatically find e/i, age for file name
+  if (length(grep("e",celltypes[1]) == 1)){ ei.save = "excitatory" } else { ei.save = "inhibitory"}
+  
+   if (.Platform$OS.type == "unix"){
+    save(dist.euc,dist.man,cells.per.comparison.1,cells.per.comparison.2,percent.var.expl,file = paste0("/Users/kaplan/Dropbox/Dulac_Lab/Data/Sequencing_Analysis/10x_multiome/B6/",ei.save,"/sex_distance_metric_results/",file_save_name,"_sexDistMetric_",percent.var.cutoff,"_percentVarCutoff_",numHVGs,"hvgs_",dfassay,"assay.RData"))
+  } else{
+    save(dist.euc,dist.man,cells.per.comparison.1,cells.per.comparison.2,percent.var.expl,file = paste0("D:/Dropbox/Dulac_Lab/Data/Sequencing_Analysis/10x_multiome/B6/",ei.save,"/sex_distance_metric_results/",file_save_name,"_sexDistMetric_",percent.var.cutoff,"_percentVarCutoff_",numHVGs,"hvgs_",dfassay,"assay.RData"))
+  }
+  
+  
+  
+  return(list(dist.euc,dist.man,cells.per.comparison.1,cells.per.comparison.2,percent.var.expl))
+ 
+}
+
+
+DistMetricTtest <- function(dist.matrix,ctrl.intraType.cols,interType.cols,num.cells1,num.cells2,min.cells,return.all.pvals=F){
+  
+  #pre-allocate space
+  significant.celltypes <- matrix(,nrow=nrow(dist.matrix),ncol = 1)
+  all.pvals <- rep(NA,nrow(dist.matrix))
+  names(all.pvals)<-rownames(dist.matrix)
+  
+  # NA out the entries in dist.matrix where one or both samples had < min.cells
+  num.cells1[num.cells1 < min.cells] <- NA
+  num.cells2[num.cells2 < min.cells] <- NA
+  rm.entries <- is.na(num.cells1 + num.cells2)
+  dist.matrix[rm.entries] <- NA
+  
+  for (i in 1:nrow(dist.matrix)){
+    
+    ctrl.data <- dist.matrix[i,ctrl.intraType.cols]
+    ctrl.data <- ctrl.data[!is.na(ctrl.data)]
+    inter.type.data <- dist.matrix[i,interType.cols]
+    inter.type.data <- inter.type.data[!is.na(inter.type.data)]
+    
+    if ((length(ctrl.data) > 1) & (length(inter.type.data) > 1)){
+      t.results <- t.test(ctrl.data,inter.type.data,var.equal=T)
+      all.pvals[i] <- t.results$p.value
+      if (t.results$p.value < 0.05){
+        significant.celltypes[i] <- t.results$p.value
+      }
+
+    }
+    
+  }
+  
+  names(significant.celltypes) <- row.names(dist.matrix)
+  significant.celltypes <- significant.celltypes[!is.na(significant.celltypes)]
+  
+  if (return.all.pvals == T){
+    return(all.pvals)
+  }
+  
+  return(significant.celltypes)
+
+}
+
+```
+
+```{r run distance metric functions}
+
+#load the merged data
+#the merged data consists of only excitatory neurons (would be run the same way with inhibitory neurons, just run separately), merged across all ages, then normalized using SCTransform across the entire dataset.
+
+excit.merge <- readRDS("")
+
+#For the data in Fig 4,5 and Ext Fig 9,10, we supplemented with additional male/female/control datasets - see the associated Methods section.
+
+
+#Run for each age separately. Using P65 as an example.
+
+#run for P65 first
+
+excit.plus.ctrls.p65 <- subset(excit.plus.ctrls,subset = age == "p65")
+
+dm.excit.p65 <- DistMetric_sex(excit.plus.ctrls.p65,file_save_name = "",dfassay="SCT")
+
+dm.excit.p65.man <- dm.excit.p65[[2]] / apply(dm.excit.p65[[2]],1,max,na.rm=T)
+
+colnames(dm.excit.p65.man)
+
+#Enter below the column numbers that are controls (male-male or female-female, or mut-mut or ctrl-ctrl) or experimentals (male-female or mut-ctrl)
+
+DistMetricTtest(dm.excit.p65.man,
+                c(1:13), #control columns
+                c(14:28), #experimental columns
+                dm.excit.p65[[3]],
+                dm.excit.p65[[4]],5)
+
+#DistMetricTtest should report the significant cell types (p<0.05).
+
+#visualize the distances
+pheatmap(dm.excit.p65.man,cluster_rows = F,cluster_cols = F, color = bathy_deep_pal(50),border_color = NA)
+
+
+
+```
+
+
+
