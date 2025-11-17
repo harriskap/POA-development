@@ -1,0 +1,532 @@
+---
+title: "inhibitory + ctrls pseudobulk sex differences"
+author: "Noor Sohail"
+date: "`r Sys.Date()`"
+output:
+   html_document:
+      code_folding: hide
+      df_print: paged
+      highlights: pygments
+      number_sections: true
+      self_contained: true
+      theme: default
+      toc: true
+      toc_float:
+         collapsed: true
+         smooth_scroll: true
+---
+```{r, cache=FALSE, message=FALSE}
+library(tidyverse)
+library(data.table)
+library(knitr)
+library(plyr)
+library(dplyr)
+library(glue)
+library(Seurat)
+library(scales)
+library(ggh4x)
+library(gridExtra)
+library(EnhancedVolcano)
+library(Azimuth)
+library(ggalluvial)
+
+library(SingleCellExperiment)
+library(dplyr)
+library(scuttle)
+library(Matrix.utils)
+library(magrittr)
+library(purrr)
+library(DESeq2)
+library(pheatmap)
+library(RColorBrewer)
+
+
+ggplot2::theme_set(theme_light(base_size = 11))
+opts_chunk[["set"]](
+    cache = FALSE,
+    dev = c("png", "pdf"),
+    error = TRUE,
+    highlight = TRUE,
+    message = FALSE,
+    prompt = FALSE,
+    tidy = FALSE,
+    warning = FALSE)
+
+axis <- ggh4x::guide_axis_truncated(
+  trunc_lower = unit(0, "npc"),
+  trunc_upper = unit(2, "cm")
+)
+```
+
+```{r}
+#' Create sub-chunks for plots
+#'
+#' taken from: https://stackoverflow.com/questions/15365829/dynamic-height-and-width-for-knitr-plots
+#'
+#' @param pl a plot object
+#' @param fig.height figure height
+#' @param fig.width figure width
+#' @param chunk_name name of the chunk
+#'
+#' @author Andreas Scharmueller \email{andschar@@protonmail.com}
+#'
+subchunkify = function(pl,
+                       fig.height = 7,
+                       fig.width = 5,
+                       chunk_name = 'plot') {
+  pl_deparsed = paste0(deparse(function() {
+    pl
+  }), collapse = '')
+  
+  sub_chunk = paste0(
+    "```{r ",
+    chunk_name,
+    ", fig.height=",
+    fig.height,
+    ", fig.width=",
+    fig.width,
+    ", dpi=72",
+    ", echo=FALSE, message=FALSE, warning=FALSE, fig.align='center'}",
+    "\n(",
+    pl_deparsed,
+    ")()",
+    "\n```"
+  )
+  
+  cat(knitr::knit(
+    text = knitr::knit_expand(text = sub_chunk),
+    quiet = TRUE
+  ))
+}
+```
+
+# Project details
+
+``` {r}
+set.seed(2023)
+
+name_project <- "Inhibitory + ctrls pseudobulk"
+name_pi <- "Catherine Dulac"
+
+name_file <- gsub(" ", "_", name_project)
+name_file <- gsub("-", "_", name_file)
+
+out <- "inhibitory_plutCtrl_pseudo"
+
+cond_1 <- "male"
+cond_2 <- "female"
+```
+
+
+```{r echo=FALSE}
+# filenames <- c("../data/inhib_Ctrls.RDS", "../data/inhibitory_merged_noNA.RDS")
+# # saveRDS(seurat, filename)
+
+# seurat_list <- list()
+# for (file in filenames) {
+#   seurat_list[[file]] <- readRDS(file)
+# }
+
+# # Merge together the seurat objects
+# merged <- merge(
+#     x = seurat_list[[1]],
+#     y = seurat_list[[2]],
+#     add.cell.ids = names(seurat_list)
+#     )
+filename <- "../data/inhib_merge_noNA_plusCtrls.RDS"
+seurat <- readRDS(filename)
+
+```
+
+
+```{r}
+# Remove sex related genes
+rm_genes <- read.csv("../../meta/y_chromosome_and_x_inactivation_genes.csv", header=FALSE)
+rm_genes <- rm_genes$V1
+seurat <- seurat[setdiff(x = rownames(x = seurat), y = rm_genes), ]
+
+# Remove mito and ribo genes
+genes_mt <- rownames(seurat)[grepl("^mt-", rownames(seurat))]
+genes_rb <- rownames(seurat)[grepl("^Rps|Rrpl", rownames(seurat))]
+seurat <- seurat[setdiff(x = rownames(x = seurat), y = genes_mt), ]
+seurat <- seurat[setdiff(x = rownames(x = seurat), y = genes_rb), ]
+```
+
+```{r}
+# Group together ages
+seurat$group <- ""
+
+# e16 + e18 + p0
+seurat$group[seurat$age == "e16"] <- "e16-e18-p0"
+seurat$group[seurat$age == "e18"] <- "e16-e18-p0"
+seurat$group[seurat$age == "p0"] <- "e16-e18-p0"
+
+# p4 + p10
+seurat$group[seurat$age == "p4"] <- "p4-p10"
+seurat$group[seurat$age == "p10"] <- "p4-p10"
+
+# P18 + P28
+seurat$group[seurat$age == "p18"] <- "p18-p28"
+seurat$group[seurat$age == "p28"] <- "p18-p28"
+
+
+# p65 
+seurat$group[seurat$age == "p65"] <- "p65"
+```
+
+```{r}
+# Name of column we are doing comparisons for
+fill <- "sex"
+n_samples <- length(unique(seurat$sample))
+```
+
+
+# Female vs male
+
+This is a DESeq2 pseudobulk DEG analysis. I have followed the steps pseudobulk steps outlined by the HBC training team [here] (https://hbctraining.github.io/scRNA-seq/lessons/pseudobulk_DESeq2_scrnaseq.html).
+
+For this particular study, we are doing a comparison across timepoints. Previous work indicates that taking the replicate into consideration improves the results and thus is part of the consideration for computing DEGs. I have used this model as input for DESeq2:
+`design = ~sex`
+
+For each condition, I have included the following plots:
+
+* Number of cells
+* Volcano plot
+* Table of all significant DEGs
+* Violin plot of 5 significant genes with the highest positive average log2-fold change values
+* UMAP of where cells for each condition is located and the top 5 genes (same genes in the violin plot)
+
+```{r}
+seurat$group <- paste0(seurat$group, "+", seurat$my.cell.type)
+```
+
+
+```{r}
+cluster_id <- "group"
+sample_id <- "sample"
+group_id <- "sex"
+
+seurat$sample <- str_replace_all(seurat$sample, "_", "-")
+
+seurat$cluster_id <- seurat[[cluster_id]]
+seurat$sample_id <- seurat[[sample_id]]
+seurat$group_id <- seurat[[group_id]]
+```
+
+```{r}
+# Extract raw counts and metadata to create SingleCellExperiment object
+counts <- seurat@assays$RNA@counts
+metadata <- seurat@meta.data
+
+# Set up metadata as desired for aggregation and DE analysis
+metadata$cluster_id <- as.factor(seurat@meta.data[[cluster_id]])
+metadata$sample_id <- as.factor(seurat@meta.data[[sample_id]])
+metadata$group_id <- as.factor(seurat@meta.data[[group_id]])
+
+
+# Create single cell experiment object
+sce <- SingleCellExperiment(assays = list(counts = counts),
+                           colData = metadata)
+
+```
+
+```{r}
+cluster_names <- levels(colData(sce)$cluster_id)
+sample_names <- levels(colData(sce)$sample_id)
+groups <- colData(sce)[, c("cluster_id", "sample_id")]
+
+# Aggregate across cluster-sample groups
+aggr_counts <- aggregate.Matrix(t(counts(sce)), 
+                                groupings = groups, fun = "sum") 
+# Transpose aggregated matrix to have genes as rows and samples as columns
+aggr_counts <- t(aggr_counts)
+```
+
+```{r}
+# Loop over all cell types to extract corresponding counts, and store information in a list
+## Initiate empty list
+counts_ls <- list()
+
+for (i in 1:length(cluster_names)) {
+
+  ## Extract indexes of columns in the global matrix that match a given cluster
+  column_idx <- which(tstrsplit(colnames(aggr_counts), "_")[[1]] == cluster_names[i])
+  
+  ## Store corresponding sub-matrix as one element of a list
+  counts_ls[[i]] <- aggr_counts[, column_idx]
+  names(counts_ls)[i] <- cluster_names[i]
+}
+```
+
+```{r}
+# Extract sample-level variables
+metadata <- colData(sce) %>% 
+  as.data.frame() %>% 
+  dplyr::select(group_id, sample_id)
+
+# Exclude duplicated rows
+metadata <- metadata[!duplicated(metadata), ]
+rownames(metadata) <- metadata$sample_id
+```
+
+```{r}
+# Number of cells per sample and cluster
+t <- table(colData(sce)$sample_id,
+           colData(sce)$cluster_id)
+
+
+# Creating metadata list
+## Initiate empty list
+metadata_ls <- list()
+
+for (i in 1:length(counts_ls)) {
+  
+    ## Initiate a data frame for cluster i with one row per sample (matching column names in the counts matrix)
+    df <- data.frame(cluster_sample_id = colnames(counts_ls[[i]]))
+
+    if (empty(df)) {
+      print(names(counts_ls)[i])
+      next
+    }
+    
+    ## Use tstrsplit() to separate cluster (cell type) and sample IDs
+    df$cluster_id <- tstrsplit(df$cluster_sample_id, "_")[[1]]
+    df$sample_id  <- tstrsplit(df$cluster_sample_id, "_")[[2]]
+    
+    ## Retrieve cell count information for this cluster from global cell count table
+    idx <- which(colnames(t) == unique(df$cluster_id))
+    cell_counts <- t[, idx]
+    
+    ## Remove samples with zero cell contributing to the cluster
+    cell_counts <- cell_counts[cell_counts > 0]
+    
+    ## Match order of cell_counts and sample_ids
+    sample_order <- match(df$sample_id, names(cell_counts))
+    cell_counts <- cell_counts[sample_order]
+    
+    ## Append cell_counts to data frame
+    df$cell_count <- cell_counts
+    
+    
+    ## Join data frame (capturing metadata specific to cluster) to generic metadata
+    df <- plyr::join(df, metadata, 
+                     by = intersect(names(df), names(metadata)))
+    
+    ## Update rownames of metadata to match colnames of count matrix, as needed later for DE
+    rownames(df) <- df$cluster_sample_id
+    
+    ## Store complete metadata for cluster i in list
+    metadata_ls[[i]] <- df
+    names(metadata_ls)[i] <- unique(df$cluster_id)
+
+}
+```
+
+```{r results="asis", echo=FALSE}
+cluster_names <- sort(cluster_names)
+for (cluster_name in cluster_names) {
+  # cat(glue("# {cluster_name}\n\n"))
+  cat(paste0("# ", cluster_name, " {.tabset} \n\n"))
+
+  idx <- which(names(counts_ls) == cluster_name)
+  cluster_counts <- counts_ls[[idx]]
+  cluster_metadata <- metadata_ls[[idx]]
+
+
+  cat("### Number of cells\n")
+  seurat_sub <- subset(seurat, subset = (cluster_id == cluster_name))
+  n_samples <- length(unique(seurat_sub$sample))
+  p <- seurat_sub@meta.data %>%
+          ggplot() +
+          geom_bar(aes(
+              x = sample,
+              fill = group_id), stat = "count", color = "black") +
+          theme_classic() +
+          xlab("Sample") +
+          ylab("Number of Cells") +
+          ggtitle(glue("{cluster_name}\nNumber of Cells")) +
+          theme(plot.title = element_text(hjust = 0.5)) +
+          labs(fill = str_to_title(str_replace(fill, "_", " "))) +
+          geom_text(aes(x = sample, label = after_stat(count)), stat = "count", vjust = -0.5) +
+          theme(axis.text.x = element_text(angle=90, hjust=1))
+  subchunkify(p, 7, n_samples, chunk_name=glue("{cluster_name}-ncells"))
+  cat("\n\n")
+
+  if (n_samples < 4) {next}
+
+  # Create DESeq2 object
+  dds <- DESeqDataSetFromMatrix(cluster_counts,
+                              colData = cluster_metadata,
+                              design = ~ group_id)
+
+
+  cat("### PCA\n")
+  # Transform counts for data visualization
+  rld <- rlog(dds, blind=TRUE)
+
+  # Plot PCA
+  pca_var <- "cluster_id"
+  pcaData <- plotPCA(rld, ntop=500, intgroup=c("group_id", pca_var), returnData=TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  p <- ggplot(pcaData, aes(pcaData$PC1, pcaData$PC2, color=group_id, shape=get(pca_var))) +
+      geom_point(size=3) +
+      xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+      ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+      coord_fixed() +
+      theme_classic() +
+      labs(shape=get(pca_var)) +
+      ggtitle(cluster_name) +
+      theme(plot.title = element_text(hjust = 0.5))
+  subchunkify(p, 6, 8, chunk_name=glue("{cluster_name}-pca"))
+  cat("\n\n")
+
+
+  cat("### Heatmap sample correlation\n")
+  # Extract the rlog matrix from the object and compute pairwise correlation values
+  rld_mat <- assay(rld)
+  rld_cor <- cor(rld_mat)
+
+  # Plot heatmap
+  p <- pheatmap(rld_cor, annotation_col = cluster_metadata[, c("group_id"), drop=F], silent=T)
+  subchunkify(p, n_samples*2, (n_samples*2)+2, chunk_name=glue("{cluster_name}-corr"))
+  cat("\n\n")
+
+
+  # Run DESeq2 differential expression analysis
+  dds <- DESeq(dds)
+  # Plot dispersion estimates
+  # plotDispEsts(dds)
+  # Check the coefficients for the comparison
+  # resultsNames(dds)
+
+  # Generate results object
+  res <- results(dds, 
+              name = "group_id_male_vs_female",
+              alpha = 0.05)
+
+  # Shrink the log2 fold changes to be more appropriate using the apeglm method - should cite [paper]() when using this method
+  res <- lfcShrink(dds, 
+                  coef = "group_id_male_vs_female",
+                  res=res,
+                  type = "apeglm")
+
+
+  # Turn the DESeq2 results object into a tibble for use with tidyverse functions
+  res_tbl <- res %>%
+      data.frame() %>%
+      rownames_to_column(var = "gene") %>%
+      as_tibble() %>%
+      arrange(padj)
+
+  write.csv(res_tbl, glue("results/{out}/{cluster_name}.csv"))
+
+  cat("### Volcano\n")
+  p <- EnhancedVolcano(res_tbl,
+    res_tbl$gene,
+    x="log2FoldChange",
+    y="padj",
+    pCutoff = 0.05,
+    FCcutoff = 0.5,
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE
+  )
+  subchunkify(p, 8, 9, chunk_name=glue("{cluster_name}-volcano"))
+  cat("\n\n")
+
+
+  # Set thresholds
+  padj_cutoff <- 0.05
+  # Subset the significant results
+  sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+      dplyr::arrange(padj)
+
+
+  if (dim(sig_res)[1] == 0 || dim(sig_res)[1] == 1) {next}
+
+  cat("### Sig genes\n")
+  cat(knitr::knit_print(sig_res))
+  cat("\n\n")
+
+
+  cat("### Heatmap\n")
+  # Heatmap
+  ## Extract normalized counts from dds object
+  normalized_counts <- counts(dds, normalized = TRUE)
+
+  ## Extract normalized counts for significant genes only
+  sig_counts <- normalized_counts[rownames(normalized_counts) %in% sig_res$gene, ]
+
+  ## Set a color-blind friendly palette
+  heat_colors <- rev(brewer.pal(11, "PuOr"))
+  p <- pheatmap(sig_counts, 
+          color = heat_colors, 
+          cluster_rows = TRUE, 
+          show_rownames = FALSE,
+          annotation_col = cluster_metadata[, c("group_id"), drop=F],
+          border_color = NA,
+          fontsize = 10,
+          scale = "row",
+          fontsize_row = 10,
+          height = 20,
+          silent=T)
+  subchunkify(p, 8, 8, chunk_name=glue("{cluster_name}-pseudo_heatmap"))
+  cat("\n\n")
+
+
+  cat("### Scatterplot top 20\n")
+  ## Extract normalized counts from dds object
+  normalized_counts <- counts(dds, normalized = TRUE)
+
+  ## Extract top 20 DEG from resLFC (make sure to order by padj)
+  top20_sig_genes <- sig_res %>%
+    dplyr::arrange(padj) %>%
+    dplyr::pull(gene) %>%
+    head(n = 20)
+
+  ## Extract matching normalized count values from matrix
+  top20_sig_counts <- normalized_counts[rownames(normalized_counts) %in% top20_sig_genes, ]
+
+  ## Convert wide matrix to long data frame for ggplot2
+  top20_sig_df <- data.frame(top20_sig_counts)
+  top20_sig_df$gene <- rownames(top20_sig_counts)
+
+  top20_sig_df <- melt(setDT(top20_sig_df), 
+                      id.vars = c("gene"),
+                      variable.name = "cluster_sample_id") %>% data.frame()
+
+  ## Replace "." by " " in cluster_sample_id variable (melt() introduced the ".")
+  top20_sig_df <- top20_sig_df %>% separate_wider_delim(cluster_sample_id, delim = "_", names = c("cluster", "sample"))
+  top20_sig_df$cluster <- sub("\\.e", "+e", top20_sig_df$cluster)
+  top20_sig_df$cluster <- gsub("\\.", "-", top20_sig_df$cluster)
+  top20_sig_df$sample <- gsub("\\.", "-", top20_sig_df$sample)
+
+  top20_sig_df$cluster_sample_id <- paste0(top20_sig_df$cluster, "_", top20_sig_df$ sample)
+
+
+  ## Join counts data frame with metadata
+  top20_sig_df <- plyr::join(top20_sig_df, as.data.frame(colData(dds)),
+                            by = "cluster_sample_id")
+
+  ## Generate plot
+  p <- ggplot(top20_sig_df, aes(y = value, x = group_id, col = group_id)) +
+    geom_jitter(height = 0, width = 0.15) +
+    scale_y_continuous(trans = 'log10') +
+    ylab("log10 of normalized expression level") +
+    xlab("condition") +
+    ggtitle("Top 20 Significant DE Genes") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    facet_wrap(~ gene)
+
+  subchunkify(p, 10, 8, chunk_name=glue("{cluster_name}-pseudo_scatter"))
+  cat("\n\n")
+
+  cat("### Violin top 20\n")
+  Idents(seurat_sub) <- seurat_sub$group_id
+  genes <- sort(top20_sig_genes)
+  n_genes <- length(genes)
+
+  p <- VlnPlot(object = seurat_sub, features = genes, ncol=5, pt.size = 0)
+  subchunkify(p, 10, 10, chunk_name=glue("{cluster_name}-sc_vln"))
+  cat("\n\n")
+}
+```
